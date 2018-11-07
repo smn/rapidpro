@@ -1010,6 +1010,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.mblox.MbloxType",
     "temba.channels.types.messangi.MessangiType",
     "temba.channels.types.plivo.PlivoType",
+    "temba.channels.types.rbm.RBMType",
     "temba.channels.types.redrabbit.RedRabbitType",
     "temba.channels.types.shaqodoon.ShaqodoonType",
     "temba.channels.types.smscentral.SMSCentralType",

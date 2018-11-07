@@ -63,6 +63,7 @@ VIBER_SCHEME = "viber"
 FCM_SCHEME = "fcm"
 WHATSAPP_SCHEME = "whatsapp"
 WECHAT_SCHEME = "wechat"
+RBM_SCHEME = "rbm"
 
 FACEBOOK_PATH_REF_PREFIX = "ref:"
 
@@ -81,6 +82,7 @@ URN_SCHEME_CONFIG = (
     (WECHAT_SCHEME, _("WeChat identifier"), WECHAT_SCHEME),
     (FCM_SCHEME, _("Firebase Cloud Messaging identifier"), FCM_SCHEME),
     (WHATSAPP_SCHEME, _("WhatsApp identifier"), WHATSAPP_SCHEME),
+    (RBM_SCHEME, _("RBM identifier"), RBM_SCHEME),
 )
 
 
