@@ -52,6 +52,9 @@ AWS_STORAGE_BUCKET_NAME = "dl-temba-io"
 AWS_BUCKET_DOMAIN = AWS_STORAGE_BUCKET_NAME + ".s3.amazonaws.com"
 STORAGE_ROOT_DIR = "test_orgs" if TESTING else "orgs"
 
+# bucket where archives files are stored
+ARCHIVE_BUCKET = "dl-temba-archives"
+
 # keys to access s3
 AWS_ACCESS_KEY_ID = "aws_access_key_id"
 AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
@@ -286,7 +289,7 @@ BRANDING = {
         "splash": "brands/rapidpro/splash.jpg",
         "logo": "brands/rapidpro/logo.png",
         "allow_signups": True,
-        "flow_types": ["F", "V", "S", "U"],  # see Flow.FLOW, Flow.VOICE, Flow.SURVEY, Flow.USSD
+        "flow_types": ["M", "V", "S", "U"],  # see Flow.TYPE_MESSAGE, Flow.TYPE_VOICE, Flow.TYPE_SURVEY, Flow.TYPE_USSD
         "tiers": dict(import_flows=0, multi_user=0, multi_org=0),
         "bundles": [],
         "welcome_packs": [dict(size=5000, name="Demo Account"), dict(size=100000, name="UNICEF Account")],
@@ -1009,6 +1012,7 @@ CHANNEL_TYPES = [
     "temba.channels.types.mtarget.MtargetType",
     "temba.channels.types.mblox.MbloxType",
     "temba.channels.types.messangi.MessangiType",
+    "temba.channels.types.novo.NovoType",
     "temba.channels.types.plivo.PlivoType",
     "temba.channels.types.rbm.RBMType",
     "temba.channels.types.redrabbit.RedRabbitType",
