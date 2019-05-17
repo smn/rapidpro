@@ -1,13 +1,13 @@
-import iso8601
 import locale
 import resource
-
 from decimal import Decimal
-from django.conf import settings
-from django.db import transaction
-from django_countries import countries
 from itertools import islice
 
+import iso8601
+from django_countries import countries
+
+from django.conf import settings
+from django.db import transaction
 
 TRANSFERTO_COUNTRY_NAMES = {"Democratic Republic of the Congo": "CD", "Ivory Coast": "CI", "United States": "US"}
 
@@ -26,7 +26,7 @@ def percentage(numerator, denominator):
     if not denominator or not numerator:
         return 0
 
-    return int(100.0 * numerator / denominator + .5)
+    return int(100.0 * numerator / denominator + 0.5)
 
 
 def format_number(val):

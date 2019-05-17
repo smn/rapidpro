@@ -3,19 +3,18 @@ import itertools
 import logging
 import mimetypes
 import os
-import random
 import re
-import traceback
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from uuid import uuid4
 
 import pycountry
 import regex
 import stripe
+import stripe.error
 from dateutil.relativedelta import relativedelta
 from django_redis import get_redis_connection
 from requests import Session
@@ -35,6 +34,7 @@ from django.utils.functional import cached_property
 from django.utils.text import slugify
 from django.utils.translation import ugettext_lazy as _
 
+from temba import mailroom
 from temba.archives.models import Archive
 from temba.bundles import get_brand_bundles, get_bundle_map
 from temba.locations.models import AdminBoundary, BoundaryAlias
@@ -49,6 +49,9 @@ from temba.utils.text import random_string
 from temba.values.constants import Value
 
 EARLIEST_IMPORT_VERSION = "3"
+
+
+logger = logging.getLogger(__name__)
 
 
 # making this a function allows it to be used as a default for Django fields
@@ -106,12 +109,7 @@ TRANSFERTO_ACCOUNT_LOGIN = "TRANSFERTO_ACCOUNT_LOGIN"
 TRANSFERTO_AIRTIME_API_TOKEN = "TRANSFERTO_AIRTIME_API_TOKEN"
 TRANSFERTO_ACCOUNT_CURRENCY = "TRANSFERTO_ACCOUNT_CURRENCY"
 
-SMTP_FROM_EMAIL = "SMTP_FROM_EMAIL"
-SMTP_HOST = "SMTP_HOST"
-SMTP_USERNAME = "SMTP_USERNAME"
-SMTP_PASSWORD = "SMTP_PASSWORD"
-SMTP_PORT = "SMTP_PORT"
-SMTP_ENCRYPTION = "SMTP_ENCRYPTION"
+SMTP_SERVER = "smtp_server"
 
 CHATBASE_AGENT_NAME = "CHATBASE_AGENT_NAME"
 CHATBASE_API_KEY = "CHATBASE_API_KEY"
@@ -174,6 +172,8 @@ class Org(SmartModel):
     Users will create new Org for Flows that should be kept separate (say for distinct projects), or for
     each country where they are deploying messaging applications.
     """
+
+    uuid = models.UUIDField(unique=True, default=uuid4)
 
     name = models.CharField(verbose_name=_("Name"), max_length=128)
     plan = models.CharField(
@@ -304,6 +304,29 @@ class Org(SmartModel):
         help_text=_("The parent org that manages this org"),
     )
 
+    def enable_flow_server(self):
+        """
+        Enables the flow server for this org. This switches all flows to be flow-server-enabled and switched all handling
+        to take place through Mailroom going forward. Note that people currently in flows will be interrupted and there's
+        no going back after doing this.
+        """
+        from temba.flows.models import FlowRun
+
+        # update all channels (we do this first as this may throw and we don't want to do the rest unless it succeeds)
+        for channel in self.channels.filter(is_active=True):
+            channel_type = channel.get_type()
+            channel_type.enable_flow_server(channel)
+
+        # interrupt all active runs
+        FlowRun.bulk_exit(self.runs.filter(is_active=True), FlowRun.EXIT_TYPE_INTERRUPTED)
+
+        # flip all flows
+        self.flows.filter(is_active=True).update(flow_server_enabled=True)
+
+        # finally flip our org
+        self.flow_server_enabled = True
+        self.save(update_fields=["flow_server_enabled", "modified_on"])
+
     @classmethod
     def get_unique_slug(cls, name):
         slug = slugify(name)
@@ -414,7 +437,6 @@ class Org(SmartModel):
     def is_whitelisted(self):
         return self.config.get(ORG_STATUS, None) == WHITELISTED
 
-    @transaction.atomic
     def import_app(self, data, user, site=None):
         from temba.flows.models import Flow
         from temba.campaigns.models import Campaign
@@ -438,11 +460,16 @@ class Org(SmartModel):
 
             data = FlowRevision.migrate_export(self, data, same_site, export_version)
 
-        # we need to import flows first, they will resolve to
-        # the appropriate ids and update our definition accordingly
-        Flow.import_flows(data, self, user, same_site)
-        Campaign.import_campaigns(data, self, user, same_site)
-        Trigger.import_triggers(data, self, user, same_site)
+        with transaction.atomic():
+            # we need to import flows first, they will resolve to
+            # the appropriate ids and update our definition accordingly
+            new_flows = Flow.import_flows(data, self, user, same_site)
+            Campaign.import_campaigns(data, self, user, same_site)
+            Trigger.import_triggers(data, self, user, same_site)
+
+        # with all the flows and dependencies committed, we can now have mailroom do full validation
+        for flow in new_flows:
+            mailroom.get_client().flow_validate(self, flow.as_json())
 
     @classmethod
     def export_definitions(cls, site_link, components):
@@ -608,14 +635,6 @@ class Org(SmartModel):
             Channel.ROLE_SEND, scheme=scheme, contact_urn=contact_urn, country_code=country_code
         )
 
-    def get_ussd_channel(self, contact_urn=None, country_code=None):
-        from temba.contacts.models import TEL_SCHEME
-        from temba.channels.models import Channel
-
-        return self.get_channel_for_role(
-            Channel.ROLE_USSD, scheme=TEL_SCHEME, contact_urn=contact_urn, country_code=country_code
-        )
-
     def get_receive_channel(self, scheme, contact_urn=None, country_code=None):
         from temba.channels.models import Channel
 
@@ -638,11 +657,6 @@ class Org(SmartModel):
         return self.get_channel_for_role(
             Channel.ROLE_ANSWER, scheme=TEL_SCHEME, contact_urn=contact_urn, country_code=country_code
         )
-
-    def get_ussd_channels(self):
-        from temba.channels.models import ChannelType, Channel
-
-        return Channel.get_by_category(self, ChannelType.Category.USSD)
 
     def get_channel_delegate(self, channel, role):
         """
@@ -779,54 +793,39 @@ class Org(SmartModel):
                     pending = Channel.get_pending_messages(self)
                     Msg.send_messages(pending)
 
-    def add_smtp_config(self, from_email, host, username, password, port, encryption, user):
-        smtp_config = {
-            SMTP_FROM_EMAIL: from_email.strip(),
-            SMTP_HOST: host,
-            SMTP_USERNAME: username,
-            SMTP_PASSWORD: password,
-            SMTP_PORT: port,
-            SMTP_ENCRYPTION: encryption,
-        }
+    def add_smtp_config(self, from_email, host, username, password, port, user):
+        query = urlencode({"from": f"{from_email.strip()}", "tls": "true"})
 
         config = self.config
-        config.update(smtp_config)
+        config.update({SMTP_SERVER: f"smtp://{quote(username)}:{quote(password, safe='')}@{host}:{port}/?{query}"})
         self.config = config
         self.modified_by = user
         self.save()
 
     def remove_smtp_config(self, user):
         if self.config:
-
-            self.config.pop(SMTP_FROM_EMAIL)
-            self.config.pop(SMTP_HOST)
-            self.config.pop(SMTP_USERNAME)
-            self.config.pop(SMTP_PASSWORD)
-            self.config.pop(SMTP_PORT)
-            self.config.pop(SMTP_ENCRYPTION)
+            self.config.pop(SMTP_SERVER)
             self.modified_by = user
             self.save()
 
     def has_smtp_config(self):
         if self.config:
-            smtp_from_email = self.config.get(SMTP_FROM_EMAIL, None)
-            smtp_host = self.config.get(SMTP_HOST, None)
-            smtp_username = self.config.get(SMTP_USERNAME, None)
-            smtp_password = self.config.get(SMTP_PASSWORD, None)
-            smtp_port = self.config.get(SMTP_PORT, None)
-
-            return smtp_from_email and smtp_host and smtp_username and smtp_password and smtp_port
+            smtp_server = self.config.get(SMTP_SERVER, None)
+            return bool(smtp_server)
         else:
             return False
 
     def email_action_send(self, recipients, subject, body):
         if self.has_smtp_config():
-            smtp_from_email = self.config.get(SMTP_FROM_EMAIL, None)
-            smtp_host = self.config.get(SMTP_HOST, None)
-            smtp_port = self.config.get(SMTP_PORT, None)
-            smtp_username = self.config.get(SMTP_USERNAME, None)
-            smtp_password = self.config.get(SMTP_PASSWORD, None)
-            use_tls = self.config.get(SMTP_ENCRYPTION, None) == "T" or None
+            smtp_server = self.config.get(SMTP_SERVER, None)
+            parsed_smtp_server = urlparse(smtp_server)
+            smtp_from_email = parse_qs(parsed_smtp_server.query).get("from", [None])[0] or ""
+            use_tls = parse_qs(parsed_smtp_server.query).get("tls", ["true"])[0].lower() == "true"
+
+            smtp_host = parsed_smtp_server.hostname
+            smtp_port = parsed_smtp_server.port
+            smtp_username = unquote(parsed_smtp_server.username)
+            smtp_password = unquote(parsed_smtp_server.password)
 
             send_custom_smtp_email(
                 recipients, subject, body, smtp_from_email, smtp_host, smtp_port, smtp_username, smtp_password, use_tls
@@ -909,9 +908,8 @@ class Org(SmartModel):
         )
 
         response = client.create_application(params=params)
-        response_json = json.loads(response)
-        app_id = response_json.get("id", None)
-        private_key = response_json.get("keys", dict()).get("private_key", None)
+        app_id = response.get("id", None)
+        private_key = response.get("keys", dict()).get("private_key", None)
 
         nexmo_config[NEXMO_APP_ID] = app_id
         nexmo_config[NEXMO_APP_PRIVATE_KEY] = private_key
@@ -921,9 +919,6 @@ class Org(SmartModel):
         self.config = config
         self.modified_by = user
         self.save()
-
-        # clear all our channel configurations
-        self.clear_channel_caches()
 
     def nexmo_uuid(self):
         config = self.config
@@ -937,9 +932,6 @@ class Org(SmartModel):
         self.config = config
         self.modified_by = user
         self.save()
-
-        # clear all our channel configurations
-        self.clear_channel_caches()
 
     def is_connected_to_nexmo(self):
         if self.config:
@@ -970,9 +962,6 @@ class Org(SmartModel):
             self.modified_by = user
             self.save()
 
-            # clear all our channel configurations
-            self.clear_channel_caches()
-
     def remove_twilio_account(self, user):
         if self.config:
             # release any twilio and twilio messaging sevice channels
@@ -984,9 +973,6 @@ class Org(SmartModel):
             self.config[APPLICATION_SID] = ""
             self.modified_by = user
             self.save()
-
-            # clear all our channel configurations
-            self.clear_channel_caches()
 
     def connect_chatbase(self, agent_name, api_key, version, user):
         chatbase_config = {CHATBASE_AGENT_NAME: agent_name, CHATBASE_API_KEY: api_key, CHATBASE_VERSION: version}
@@ -1051,15 +1037,6 @@ class Org(SmartModel):
                 return NexmoClient(api_key, api_secret, app_id, app_private_key, org=self)
 
         return None
-
-    def clear_channel_caches(self):
-        """
-        Clears any cached configurations we have for any of our channels.
-        """
-        from temba.channels.models import Channel
-
-        for channel in self.channels.exclude(channel_type="A"):
-            Channel.clear_cached_channel(channel.pk)
 
     def get_country_code(self):
         """
@@ -1378,30 +1355,26 @@ class Org(SmartModel):
         )
 
     def create_sample_flows(self, api_url):
-        import json
-
         # get our sample dir
         filename = os.path.join(settings.STATICFILES_DIRS[0], "examples", "sample_flows.json")
 
         # for each of our samples
         with open(filename, "r") as example_file:
-            example = example_file.read()
+            samples = example_file.read()
 
         user = self.get_user()
         if user:
             # some some substitutions
-            org_example = example.replace("{{EMAIL}}", user.username)
-            org_example = org_example.replace("{{API_URL}}", api_url)
+            samples = samples.replace("{{EMAIL}}", user.username).replace("{{API_URL}}", api_url)
 
             try:
-                self.import_app(json.loads(org_example), user)
-            except Exception:  # pragma: needs cover
-                import traceback
-
-                logger = logging.getLogger(__name__)
-                msg = "Failed creating sample flows"
-                logger.error(msg, exc_info=True, extra=dict(definition=json.loads(org_example)))
-                traceback.print_exc()
+                self.import_app(json.loads(samples), user)
+            except Exception as e:  # pragma: needs cover
+                logger.error(
+                    f"Failed creating sample flows: {str(e)}",
+                    exc_info=True,
+                    extra=dict(definition=json.loads(samples)),
+                )
 
     def is_notified_of_mt_sms(self):
         return self.webhook_events & MT_SMS_EVENTS > 0
@@ -1504,8 +1477,7 @@ class Org(SmartModel):
 
         # if we don't have an active topup, add up pending messages too
         if not self.get_active_topup_id():
-            test_contacts = self.org_contacts.filter(is_test=True).values_list("id", flat=True)
-            used_credits_sum += self.msgs.filter(topup=None).exclude(contact_id__in=test_contacts).count()
+            used_credits_sum += self.msgs.filter(topup=None).count()
 
             # we don't cache in this case
             return used_credits_sum, 0
@@ -1670,8 +1642,7 @@ class Org(SmartModel):
 
         with self.lock_on(OrgLock.credits):
             # get all items that haven't been credited
-            test_contacts = self.org_contacts.filter(is_test=True).values_list("id", flat=True)
-            msg_uncredited = self.msgs.filter(topup=None).exclude(contact_id__in=test_contacts).order_by("created_on")
+            msg_uncredited = self.msgs.filter(topup=None).order_by("created_on")
             all_uncredited = list(msg_uncredited)
 
             # get all topups that haven't expired
@@ -1739,8 +1710,8 @@ class Org(SmartModel):
             stripe.api_key = get_stripe_credentials()[1]
             customer = stripe.Customer.retrieve(self.stripe_customer)
             return customer
-        except Exception:
-            traceback.print_exc()
+        except Exception as e:
+            logger.error(f"Could not get Stripe customer: {str(e)}", exc_info=True)
             return None
 
     def get_bundles(self):
@@ -1752,7 +1723,7 @@ class Org(SmartModel):
 
         # build an ordered dictionary of key->contact field
         fields = OrderedDict()
-        for cf in ContactField.user_fields.filter(org=self, is_active=True).order_by("key"):
+        for cf in ContactField.user_fields.active_for_org(org=self).order_by("key"):
             cf.org = self
             fields[cf.key] = cf
 
@@ -1795,9 +1766,11 @@ class Org(SmartModel):
         # 2. we already have a stripe customer, but they have just added a new card, we need to use that one
         # 3. we don't have a customer, so we need to create a new customer and use that card
 
-        # for our purposes, #1 and #2 are treated the same, we just always update the default card
+        validation_error = None
 
+        # for our purposes, #1 and #2 are treated the same, we just always update the default card
         try:
+
             if not customer or customer.email != user.email:
                 # then go create a customer object for this user
                 customer = stripe.Customer.create(card=token, email=user.email, description="{ org: %d }" % self.pk)
@@ -1811,16 +1784,11 @@ class Org(SmartModel):
                 # remove existing cards
                 # TODO: this is all a bit wonky because we are using the Stripe JS widget..
                 # if we instead used on our mechanism to display / edit cards we could be a bit smarter
-                existing_cards = [c for c in customer.cards.all().data]
+                existing_cards = [c for c in customer.cards.list().data]
                 for card in existing_cards:
                     card.delete()
 
-                try:
-                    card = customer.cards.create(card=token)
-                except stripe.CardError:
-                    raise ValidationError(
-                        _("Sorry, your card was declined, please contact your provider or try another card.")
-                    )
+                card = customer.cards.create(card=token)
 
                 customer.default_card = card.id
                 customer.save()
@@ -1878,15 +1846,19 @@ class Org(SmartModel):
 
             return topup
 
-        except ValidationError as e:
-            raise e
+        except stripe.error.CardError as e:
+            logger.warning(f"Error adding credits to org: {str(e)}", exc_info=True)
+            validation_error = _("Sorry, your card was declined, please contact your provider or try another card.")
 
         except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error("Error adding credits to org", exc_info=True)
-            raise ValidationError(
-                _("Sorry, we were unable to process your payment, please try again later or contact us.")
+            logger.error(f"Error adding credits to org: {str(e)}", exc_info=True)
+
+            validation_error = _(
+                "Sorry, we were unable to process your payment, please try again later or contact us."
             )
+
+        if validation_error is not None:
+            raise ValidationError(validation_error)
 
     def account_value(self):
         """
@@ -1920,8 +1892,8 @@ class Org(SmartModel):
 
                 try:
                     subscription = customer.cancel_subscription(at_period_end=True)
-                except Exception:
-                    traceback.print_exc()
+                except Exception as e:
+                    logger.error(f"Unable to cancel customer plan: {str(e)}", exc_info=True)
                     raise ValidationError(
                         _("Sorry, we are unable to cancel your plan at this time.  Please contact us.")
                     )
@@ -1936,9 +1908,9 @@ class Org(SmartModel):
 
                     analytics.track(user.username, "temba.plan_upgraded", dict(previousPlan=self.plan, plan=new_plan))
 
-                except Exception:
+                except Exception as e:
                     # can't load it, oh well, we'll try to create one dynamically below
-                    traceback.print_exc()
+                    logger.error(f"Unable to update Stripe customer subscription: {str(e)}", exc_info=True)
                     customer = None
 
             # if we don't have a customer, go create one
@@ -1954,8 +1926,8 @@ class Org(SmartModel):
 
                     analytics.track(user.username, "temba.plan_upgraded", dict(previousPlan=self.plan, plan=new_plan))
 
-                except Exception:
-                    traceback.print_exc()
+                except Exception as e:
+                    logger.error(f"Unable to create Stripe customer: {str(e)}", exc_info=True)
                     raise ValidationError(
                         _("Sorry, we were unable to charge your card, please try again later or contact us.")
                     )
@@ -2068,19 +2040,25 @@ class Org(SmartModel):
 
         return all_components
 
-    def initialize(self, branding=None, topup_size=None):
+    def initialize(self, branding=None, topup_size=None, flow_server_enabled=True):
         """
         Initializes an organization, creating all the dependent objects we need for it to work properly.
         """
         from temba.middleware import BrandingMiddleware
 
-        if not branding:
-            branding = BrandingMiddleware.get_branding_for_host("")
+        with transaction.atomic():
+            self.flow_server_enabled = flow_server_enabled
+            self.save(update_fields=["flow_server_enabled"])
 
-        self.create_system_groups()
-        self.create_system_contact_fields()
+            if not branding:
+                branding = BrandingMiddleware.get_branding_for_host("")
+
+            self.create_system_groups()
+            self.create_system_contact_fields()
+            self.create_welcome_topup(topup_size)
+
+        # outside of the transaction as it's going to call out to mailroom for flow validation
         self.create_sample_flows(branding.get("api_link", ""))
-        self.create_welcome_topup(topup_size)
 
     def download_and_save_media(self, request, extension=None):  # pragma: needs cover
         """
@@ -2161,12 +2139,7 @@ class Org(SmartModel):
         path = "%s/%d/media/%s" % (settings.STORAGE_ROOT_DIR, self.pk, filename)
         location = public_file_storage.save(path, file)
 
-        # force http for localhost
-        scheme = "https"
-        if "localhost" in settings.AWS_BUCKET_DOMAIN:  # pragma: no cover
-            scheme = "http"
-
-        return "%s://%s/%s" % (scheme, settings.AWS_BUCKET_DOMAIN, location)
+        return f"{settings.STORAGE_URL}/{location}"
 
     def release(self, *, release_users=True, immediately=False):
 
@@ -2222,7 +2195,7 @@ class Org(SmartModel):
         self.airtime_transfers.all().delete()
 
         # delete our contacts
-        for contact in self.org_contacts.all():
+        for contact in self.contacts.all():
             contact.release(contact.modified_by)
             contact.delete()
 
@@ -2261,6 +2234,12 @@ class Org(SmartModel):
 
         for topup in self.topups.all():
             topup.release()
+
+        for result in self.webhook_results.all():
+            result.release()
+
+        for event in self.webhookevent_set.all():
+            event.release()
 
         # now what we've all been waiting for
         self.delete()
@@ -2511,14 +2490,6 @@ class Invitation(SmartModel):
 
         return super().save(*args, **kwargs)
 
-    @classmethod
-    def generate_random_string(cls, length):  # pragma: needs cover
-        """
-        Generates a [length] characters alpha numeric secret
-        """
-        letters = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # avoid things that could be mistaken ex: 'I' and '1'
-        return "".join([random.choice(letters) for _ in range(length)])
-
     def send_invitation(self):
         from .tasks import send_invitation_email_task
 
@@ -2722,8 +2693,8 @@ class TopUp(SmartModel):
         try:
             stripe.api_key = get_stripe_credentials()[1]
             return stripe.Charge.retrieve(self.stripe_charge)
-        except Exception:
-            traceback.print_exc()
+        except Exception as e:
+            logger.error(f"Could not get Stripe charge: {str(e)}", exc_info=True)
             return None
 
     def get_used(self):

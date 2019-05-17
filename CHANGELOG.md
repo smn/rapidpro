@@ -1,3 +1,543 @@
+v4.22.46
+----------
+ * add hormuud channel type
+ * newest editor
+ * update invitation secret when user is re-invited
+
+v4.22.45
+----------
+ * Tweak compress for vendor
+
+v4.22.44
+----------
+ * Update to flow editor 1.4.18
+ * Add mailroom endpoints for functions, tweak styles for selection
+ * Honor is_active when creating contact fields
+ * Cache busting for flow editor
+
+v4.22.43
+----------
+ * Update flow editor to 1.4.17
+ * Warn users when starting a flow when they have a WhatsApp channel that they should use templates
+
+v4.22.42
+----------
+ * add page to view synched WhatsApp templates for a channel
+
+v4.22.41
+----------
+ * Update flow editor to 1.4.16
+ * View absolute attachments in old editor
+
+v4.22.40
+----------
+ * Update editor to 1.4.14
+
+v4.22.39
+----------
+ * latest editor
+
+v4.22.38
+----------
+ * update defs with db values both when writing and reading
+ * remove clearing of external ids for messages
+
+v4.22.37
+----------
+ * Update to flow-editor 1.4.12
+ * Remove footer gap on new editor
+
+v4.22.36
+----------
+ * allow Alpha users to build flows in new editor
+ * don't use RuleSets in figuring results, exports, categories
+
+v4.22.28
+----------
+ * Adjust `!=` search operator to include unset data
+ * Remove broadcast recipients table
+ * IMPORTANT * You must make sure that all purged broadcasts have been archived using
+   rp-archiver v1.0.2 before deploying this version of RapidPro
+
+v4.22.27
+----------
+ * styling tweaks to contacts page
+
+v4.22.26
+----------
+ * Always show featured ContactFields on Contact.read page
+ * Do not migrate ruleset with label null and action msg text null
+
+v4.22.25
+----------
+ * only show pagination warning when we have more than 10k results
+
+v4.22.24
+----------
+ * support != search operator
+
+v4.22.23
+----------
+ * simplify squashing of squashable models
+ * show a notification when users open the last page of the search
+ * update `modified_on` once msgs export is finished
+
+v4.22.22
+----------
+ * Fix issue with pagination when editing custom fields
+
+v4.22.21
+----------
+ * Add new page for contact field management
+
+v4.22.20
+----------
+ * add management command to reactivate fb channels
+
+v4.22.19
+----------
+ * api for templates, add access token and fb user id to claim, sync with facebook endpoint
+
+v4.22.18
+----------
+ * fix recalculating event fires for fields when that field is created_on
+
+v4.22.17
+----------
+ * Don't overwrite show_in_table flag on contact import
+ * Prevent updates of contact field labels when adding a field to a flow
+ * Add migration to populate results and waiting_exit_uuids in Flow.metadata
+
+v4.22.15
+----------
+ * Do not immediately expire flow when updating expirations (leave that to mailroom)
+ * Fix boundary aliases duplicates creation
+ * Add org lock for users to deal with similtaneous updates of org users
+ * Add results and waiting_exit_uuids to flow metadata and start populating on Flow.update
+
+v4.22.14
+----------
+ * CreateSubOrg needs to be non-atomic as well as it creates flows which need to be validated
+ * Remove unused download view
+
+v4.22.13
+----------
+ * allow blank pack, update permissions
+
+v4.22.12
+----------
+ * remove APK read view, only have update
+ * allow setting pack number
+
+v4.22.11
+----------
+ * Add APK app and new Android claiming pipeline for Android Relayer
+
+v4.22.10
+----------
+ * Use output of flow validation in mailroom to set flow dependencies
+ * Make message_actions.json API endpoint support partial updates
+ * Log to librato only pending messages older than a minute
+
+v4.22.6
+----------
+ * Add Viber Welcome Message event type and config
+ * More customer support service buttons
+
+v4.22.5
+----------
+ * queue incoming messages and incoming calls from relayer to mailroom
+
+v4.22.4
+----------
+ * Temporarily disable flow validation until we can fix it for new orgs
+
+v4.22.3
+----------
+ * Lazily create any dependent objects when we save
+ * MAILROOM_URL in settings.py.dev should default to http://localhost:8090
+ * Call to mailroom to validate a flow before saving a new definition (and fix invalid flows in our tests)
+
+v4.22.2
+----------
+ * Fix schedule next fire calculation bug when schedule is greater than number of days
+ * Fix to allow archiving flow for removed(inactive) campaign events
+ * Strip resthook slug during creation
+ * Ignore request from old android clients using GCM
+
+v4.22.1
+----------
+ * Increase the schedule broadcast text max length to be consistent on the form
+
+v4.22.0
+----------
+ * Fix case of single node flow with invalid channel reference
+ * Remove ChannelConnection.created_by and ChannelConnection.is_active
+ * Fix flow export results to include results from replaced rulesets
+
+v4.21.15
+----------
+ * correct exclusion
+
+v4.21.14
+----------
+ * Dont requeue flow server enabled msgs
+ * Exit sessions in bulk exit, ignore mailroom flow starts
+
+v4.21.13
+----------
+ * Fix import with invalid channel reference
+ * Add flow migration to remove actions with invalid channel reference
+
+v4.21.12
+----------
+ * improve simulator for goflow simulation
+
+v4.21.11
+----------
+ * work around JS split to show simulator images
+
+v4.21.10
+----------
+ * display attachments that are just 'image:'
+
+v4.21.9
+----------
+ * simulator tweaks
+ * show Django warning if mailroom URL not configured
+
+v4.21.8
+----------
+ * make sure we save flow_server_enabled in initialize
+
+v4.21.7
+----------
+ * Update status demo view to match the current webhook posted data
+ * Remove all remaining reads of contact.is_test
+
+v4.21.6
+----------
+ * Use pretty datetime on contact page for upcoming events
+
+v4.21.5
+----------
+ * Replace final index which references contact.is_test
+ * Fix labels remap on flow import
+
+v4.21.4
+----------
+ * All new orgs flow server enabled
+ * Fallback to org domain when no channe domain set
+
+v4.21.3
+----------
+ * Remove all remaining checks of is_test, except where used in queries
+ * Update contact indexes to not include is_test
+ * Prevent users from updating dynamic groups if query is invalid
+ * Update Python module dependencies
+
+v4.21.2
+----------
+ * set country code on test channel
+
+v4.21.1
+----------
+ * do not log errors for more common exceptions
+
+v4.21.0
+----------
+ * Include fake channel asset when simulating
+ * Add test for event retrying, fix out of date model
+ * Stop checking contact.is_test in db triggers
+
+v4.20.1
+----------
+ * Remove unused fields on webhookevent
+ * Default page title when contact has no name or URN (e.g. a surveyor contact)
+
+v4.19.7
+----------
+ * fix simulator to allow fields with empty value
+ * remove remaining usages of test contacts for testing
+
+v4.19.6
+----------
+ * add incoming_extra flow to mailroom test
+ * fix for test contact deletion migration
+
+v4.19.5
+----------
+ * pass extra to mailroom start task
+
+v4.19.4
+----------
+ * Support audio/mp4 as playable audio
+ * Add migration to remove test contacts
+
+v4.19.3
+----------
+ * Ensure scheduled triggers start flows in mailroom if enabled
+
+v4.19.2
+----------
+ * remap incoming ivr endpoints for Twilio channels when enabling flow server
+ * interrupt flow runs when enabling flow server
+ * add enable_flow_server method to org, call in org update view
+
+v4.19.1
+----------
+ * Scope API throttling by org and user
+ * Add export link on campaign read page
+ * Fix SMTP serever config to percentage encode slashes
+
+v4.19.0
+----------
+ * Add session_type field on FlowSession
+ * Use provided flow definition when simulating if provided
+ * Remove USSD app completely
+ * Adjust broadcast status to API endpoint
+ * Remove legacy (non-mailroom) simulation
+
+v4.18.0
+----------
+ * Make ChannelConnection.is_active nullable so it can be eventually removed
+ * Replace traceback.print_exc() with logger.error
+ * Make sure contacts ids are iterable when starting a flow
+ * Remove USSD proxy model
+
+v4.17.0
+----------
+ * Use URL kwargs for channel logs list to pass the channel uuid
+ * Fix message campaign events on normal flows not being skipped
+ * Default to month first date format for US timezones
+ * Make Contact.created_by nullable
+ * Fix to prevent campaign event to create empty translations
+ * Use new editor wrapper to embed instead of building
+ * Remove USSD functionality from engine
+
+v4.16.15
+----------
+ * Fix Stripe integration
+
+v4.16.14
+----------
+ * fix webhook bodies to be json
+
+v4.16.13
+----------
+ * better request logging for webhook results
+
+v4.16.12
+----------
+ * further simplication of webhook result model, add new read and list pages
+
+v4.16.11
+----------
+ * add org field to webhook results
+
+v4.16.10
+----------
+ * Add surveyor content in mailroom_db command
+ * Fix flows with missing flow_type
+ * Update more Python dependencies
+ * Prevent flows of one modality from starting subflows of a different modality
+
+v4.16.8
+----------
+ * Add support for Movile/Wavy channels
+ * Switch to codecov for code coverage
+ * Allow overriding brand domain via env
+ * Add mailroom_db management command for mailroom tests
+ * Start flow_server_enabled ivr flows in mailroom
+ * Remove legacty channel sending code
+ * Remove flow dependencies when deactivating USSD flows
+ * Migrations to deactivate USSD content
+
+v4.16.5
+----------
+ * Fix quick replies in simulator
+
+v4.16.4
+----------
+ * More teaks to Bongolive channel
+ * Use mailroom simulation for IVR and Surveyor flows
+ * Add a way to see all run on flow results runs table
+
+v4.16.3
+----------
+ * Simplify generation of upload URLs with new STORAGE_URL setting
+
+v4.16.2
+----------
+ * Switch BL channels used API
+ * Fix rendering of attachments for mailroom simulation
+ * Update black to the version 18.9b0
+
+v4.16.0
+----------
+ * Fix flow_entered event name in simulator
+ * Make created_by, modified_by on FlowStart nullable, add connections M2M on FlowStart
+ * Rename ChannelSession to ChannelConnection
+
+v4.15.2
+----------
+ * Fix for flow dependency migration
+ * Fix rendering of single digit hours in pretty_datetime tag
+ * Use mailroom for flow migration instead of goflow
+ * Add support for Bongo Live channel type
+
+v4.15.1
+----------
+ * Include default country in serialized environments used for simulation
+ * Add short_datetime and pretty_datetime tags which format based on org settings
+ * Prevent users from choosing flow they are editing in some cases
+
+v4.15.0
+----------
+ * Fix nexmo claim
+ * Tweak 11.7 migration to not blow up if webhook action has empty URL
+ * Bump module minor versions and remove unused modules
+ * Remove ChannelSession.modified_by
+
+v4.14.1
+----------
+ * Make older flow migrations more fault tolerant
+ * Tweaks to migrate_flows command to make error reporting more useful
+ * Add flow migration to fix duplicate rule UUIDs
+ * Update python-telegram-bot to 11.1.0
+ * Update nexmo to 2.3.0
+
+v4.14.0
+----------
+ * Fix recent messages rollover with 0 messages
+ * Use flowserver only for flow migration
+ * Make created_by and modified_by optional on channel session
+
+v4.13.2
+----------
+ * create empty revisions for empty flows
+ * proper handle of empty errors on index page
+ * fix error for policy read URL failing
+ * add quick replies to mailroom simulator
+
+v4.13.1
+----------
+ * populate simulator environment for triggers and resumes
+ * honour Flow.is_active on the Web view
+ * fix android channel release to not throw if no FCM ID
+ * add Play Mobile aggregator
+
+v4.13.0
+----------
+ * Add index for fast Android channel fetch by last seen
+ * Remove gcm_id field
+ * No messages sheet for flow results export on anon orgs
+ * Add periodic task to sync channels we have not seen for a while
+ * Add wait_started_on field to flow session
+
+v4.12.6
+----------
+ * Remove flow server trialling
+ * Replace tab characters for GSM7
+ * Use mailroom on messaging flows for simulation
+ * Raise ValidationError for ContactFields with null chars
+ * upgrade to Django 2.1
+
+v4.12.5
+----------
+ * Make sure Flow.update clears prefetched nodes after potentialy deleting them
+
+v4.12.4
+----------
+ * Fix Flow.update not deleting nodes properly when they change type
+
+v4.12.3
+----------
+ * Add try/except block on FCM sync
+ * Issue #828, remove numbers replace
+
+v4.12.2
+----------
+ * Dont show queued scheduled broadcasts in outbox
+ * Prevent deleting groups with active campaigns
+ * Activate support for media attachment for Twitter channels
+ * Remove ability to create webhook actions in editor
+ * Add flow migration to replace webhook actions with rulesets
+
+v4.12.1
+----------
+ * Fix importing campaign events based on created_om
+ * Fix event fires creation for immutable fields
+ * Remove WA status endpoint
+ * Fix IVR runs expiration date initialization
+ * Add UUID field to org
+
+v4.11.7
+----------
+ * Interrupt old IVR calls and related flow sessions
+ * Move webhook docs button from the token view to the webhook view
+
+v4.11.6
+----------
+ * Faster squashing
+ * Fix EX bulk sender form fields
+
+v4.11.5
+----------
+ * simulate flow_server_enabled flows in mailroom
+
+v4.11.3
+----------
+ * Add session log links to contact history for staff users
+ * Hide old webhook config page if not yet set
+
+v4.11.2
+----------
+ * Fix passing false/true to archived param of flows API endpoint
+
+v4.11.1
+----------
+ * Turn on the attachment support for VP channels
+ * Tweak 11.6 flow migration so that we remap groups, but never create them
+ * Flows API endpoint should support filtering by archived and type
+ * Log how many flow sessions are deleted and the time taken
+ * Turn on the attachment support for WA channels
+ * Adjust UI for adding quick replies and attachment in random order
+
+v4.11.0
+----------
+ * Add index for fetching waiting sessions by contact
+ * Ensure test_db users have same username and email
+ * Add index to FlowSession.ended_on
+ * Make FlowSession.created_on non-null
+ * Add warning class to skipped campaigns event fire on contact history
+ * Add fired_result field to campaign event fires
+
+v4.10.9
+----------
+ * Log and fail calls that cannot be started
+ * Allow contact.created_on in flows, init new event
+
+v4.10.8
+----------
+ * Deactivate events when updating campaigns
+ * Less aggressive event fire recreation
+ * Use SMTP SERVER org config and migrate old config keys
+
+v4.10.4
+----------
+ * Retry failed IVR calls
+
+v4.10.3
+----------
+ * Show all split types on run results, use elastic for searching
+
+v4.10.2
+----------
+ * Flow migration for mismatched group uuids in existing flows
+ * Remap group uuids on flow import
+ * Migration to backfill FlowSession.created_on / ended_on
+
 v4.10.1
 ----------
  * Add config to specify content that should be present in the response of the request, if not mark that as msg failed

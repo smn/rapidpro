@@ -1,10 +1,9 @@
 import os
 import shutil
 import tempfile
+from unittest.mock import Mock, mock_open, patch
 
 import responses
-from mock import mock
-from mock.mock import mock_open, patch
 
 from django.core.management import call_command
 from django.test import TestCase
@@ -13,7 +12,7 @@ from django.urls import reverse
 from temba.tests import CaptureSTDOUT, TembaTest
 from temba.utils import json
 
-from .models import AdminBoundary
+from .models import AdminBoundary, BoundaryAlias
 
 
 class LocationTest(TembaTest):
@@ -78,16 +77,42 @@ class LocationTest(TembaTest):
         self.assertEqual("", response_json[1]["aliases"])
 
         # update our alias for kigali
-        response = self.client.post(
-            reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]),
-            json.dumps([dict(osm_id=self.state1.osm_id, aliases="kigs\nkig")]),
-            content_type="application/json",
-        )
+        with self.assertNumQueries(15):
+            response = self.client.post(
+                reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]),
+                json.dumps([dict(osm_id=self.state1.osm_id, aliases="kigs\nkig")]),
+                content_type="application/json",
+            )
 
         self.assertEqual(200, response.status_code)
 
         # fetch our aliases again
-        response = self.client.get(reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]))
+        with self.assertNumQueries(32):
+            response = self.client.get(reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]))
+        response_json = response.json()
+
+        # now have kigs as an alias
+        self.assertEqual("Kigali City", response_json[1]["name"])
+        self.assertEqual("kig\nkigs", response_json[1]["aliases"])
+
+        # update our alias for kigali with duplicates
+        with self.assertNumQueries(15):
+            response = self.client.post(
+                reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]),
+                json.dumps([dict(osm_id=self.state1.osm_id, aliases="kigs\nkig\nkig\nkigs\nkig")]),
+                content_type="application/json",
+            )
+
+        self.assertEqual(200, response.status_code)
+
+        self.create_secondary_org()
+        BoundaryAlias.objects.create(
+            boundary=self.state1, org=self.org2, name="KGL", created_by=self.admin2, modified_by=self.admin2
+        )
+
+        # fetch our aliases again
+        with self.assertNumQueries(32):
+            response = self.client.get(reverse("locations.adminboundary_boundaries", args=[self.country.osm_id]))
         response_json = response.json()
 
         # now have kigs as an alias
@@ -433,7 +458,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT() as captured_output:
@@ -457,7 +482,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT():
@@ -470,7 +495,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT() as captured_output:
@@ -489,7 +514,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT():
@@ -502,7 +527,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT() as captured_output:
@@ -523,7 +548,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT():
@@ -536,7 +561,7 @@ class ImportGeoJSONtest(TestCase):
 
         with patch("builtins.open") as mock_file:
             mock_file.return_value.__enter__ = lambda filename: filename
-            mock_file.return_value.__exit__ = mock.Mock()
+            mock_file.return_value.__exit__ = Mock()
             mock_file.return_value.read.side_effect = lambda: geojson_data.pop(0)
 
             with CaptureSTDOUT() as captured_output:
@@ -554,7 +579,7 @@ class ImportGeoJSONtest(TestCase):
             zipfile_patched().namelist.return_value = ["admin_level_0_simplified.json"]
 
             zipfile_patched().open.return_value.__enter__ = lambda filename: filename
-            zipfile_patched().open.return_value.__exit__ = mock.Mock()
+            zipfile_patched().open.return_value.__exit__ = Mock()
             zipfile_patched().open.return_value.read.return_value = self.data_geojson_level_0
 
             with CaptureSTDOUT() as captured_output:

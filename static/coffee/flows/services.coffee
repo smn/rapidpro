@@ -389,16 +389,16 @@ app.service "Plumb", ["$timeout", "$rootScope", "$log", ($timeout, $rootScope, $
 
 app.factory "Revisions", ['$http', '$log', ($http, $log) ->
   new class Revisions
-    updateRevisions: (flowId) ->
+    updateRevisions: (flowUUID) ->
       _this = @
-      $http.get('/flow/revisions/' + flowId + '/').success (data, status, headers) ->
+      $http.get('/flow/revisions/' + flowUUID + '/?version=' + window.flowVersion).success (data, status, headers) ->
         # only set the revisions if we get back json, if we don't have permission we'll get a login page
         if headers('content-type') == 'application/json'
-          _this.revisions = data
+          _this.revisions = data.results
 
     getRevision: (revision) ->
       _this = @
-      return $http.get('/flow/revisions/' + flowId + '/?definition=' + revision.id).success (data, status, headers) ->
+      return $http.get('/flow/revisions/' + flowUUID + '/' + revision.id + '?version=' + window.flowVersion).success (data, status, headers) ->
         # only set the revisions if we get back json, if we don't have permission we'll get a login page
         if headers('content-type') == 'application/json'
           _this.definition = data
@@ -430,7 +430,6 @@ app.factory 'Flow', ['$rootScope', '$window', '$http', '$timeout', '$interval', 
         { type:'save', name:'Update Contact', verbose_name:'Update the contact', icon: 'icon-user', filter:ALL }
         { type:'add_group', name:'Add to Groups', verbose_name:'Add contact to a group', icon: 'icon-users-2', groups:true, filter:ALL }
         { type:'del_group', name:'Remove from Groups', verbose_name:'Remove contact from a group', icon: 'icon-users-2', groups:true, filter:ALL }
-        { type:'api', name:'Webhook', verbose_name:'Make a call to an external server', icon: 'icon-cloud-upload', filter:[MESSAGE,VOICE] }
         { type:'email', name:'Send Email', verbose_name: 'Send an email', icon: 'icon-bubble-3', filter:[MESSAGE,VOICE] }
         { type:'lang', name:'Set Language', verbose_name:'Set language for contact', icon: 'icon-language', filter:ALL }
         { type:'channel', name:'Set Channel', verbose_name:'Set preferred channel', icon: 'icon-phone', filter:[MESSAGE,VOICE] }
@@ -629,7 +628,7 @@ app.factory 'Flow', ['$rootScope', '$window', '$http', '$timeout', '$interval', 
 
           $log.debug("Saving.")
 
-          $http.post('/flow/json/' + Flow.flowId + '/', utils.toJson(Flow.flow)).error (data, statusCode) ->
+          $http.post('/flow/json/' + Flow.flowUUID + '/', utils.toJson(Flow.flow)).error (data, statusCode) ->
 
             if statusCode == 400
               $rootScope.saving = false
@@ -692,12 +691,12 @@ app.factory 'Flow', ['$rootScope', '$window', '$http', '$timeout', '$interval', 
               Flow.flow.metadata.saved_on = data.saved_on
 
               # update our auto completion options
-              $http.get('/flow/completion/?flow=' + Flow.flowId).success (data) ->
+              $http.get('/flow/completion/?flow=' + Flow.flowUUID).success (data) ->
                 Flow.completions = data.message_completions
                 Flow.function_completions = data.function_completions
                 Flow.variables_and_functions = [Flow.completions...,Flow.function_completions...]
 
-              Revisions.updateRevisions(Flow.flowId)
+              Revisions.updateRevisions(Flow.flowUUID)
 
             $rootScope.saving = null
 
@@ -1004,15 +1003,15 @@ app.factory 'Flow', ['$rootScope', '$window', '$http', '$timeout', '$interval', 
           return cfg
 
     fetchRecentMessages: (exit_uuids, to_uuid) ->
-      return $http.get('/flow/recent_messages/' + Flow.flowId + '/?exits=' + exit_uuids.join() + '&to=' + to_uuid).success (data) ->
+      return $http.get('/flow/recent_messages/' + Flow.flowUUID + '/?exits=' + exit_uuids.join() + '&to=' + to_uuid).success (data) ->
 
-    fetch: (flowId, onComplete = null) ->
+    fetch: (flowUUID, onComplete = null) ->
 
-      @flowId = flowId
-      Revisions.updateRevisions(flowId)
+      @flowUUID = flowUUID
+      Revisions.updateRevisions(flowUUID)
 
       Flow = @
-      $http.get('/flow/json/' + flowId + '/').success (data) ->
+      $http.get('/flow/json/' + flowUUID + '/').success (data) ->
 
         flow = data.flow
 
@@ -1062,7 +1061,7 @@ app.factory 'Flow', ['$rootScope', '$window', '$http', '$timeout', '$interval', 
           onComplete()
 
         # update our auto completion options
-        $http.get('/flow/completion/?flow=' + flowId).success (data) ->
+        $http.get('/flow/completion/?flow=' + flowUUID).success (data) ->
           if data.function_completions and data.message_completions
             Flow.completions = data.message_completions
             Flow.function_completions = data.function_completions

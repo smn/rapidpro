@@ -1,6 +1,5 @@
 import logging
 import time
-import traceback
 from array import array
 from datetime import date, datetime, timedelta
 from uuid import uuid4
@@ -20,13 +19,13 @@ from django.db import models, transaction
 from django.db.models import Prefetch, Q, Sum
 from django.db.models.functions import Upper
 from django.utils import timezone
-from django.utils.html import escape
 from django.utils.translation import ugettext, ugettext_lazy as _
 
 from temba.assets.models import register_asset_store
 from temba.channels.courier import push_courier_msgs
 from temba.channels.models import Channel, ChannelEvent, ChannelLog
 from temba.contacts.models import URN, Contact, ContactGroup, ContactGroupCount, ContactURN
+from temba.mailroom.queue import queue_mailroom_msg_task
 from temba.orgs.models import Language, Org, TopUp
 from temba.schedules.models import Schedule
 from temba.utils import analytics, chunk_list, extract_constants, get_anonymous_user, json, on_transaction_commit
@@ -35,15 +34,13 @@ from temba.utils.dates import datetime_to_s, datetime_to_str, get_datetime_forma
 from temba.utils.export import BaseExportAssetStore, BaseExportTask
 from temba.utils.expressions import evaluate_template
 from temba.utils.models import JSONAsTextField, SquashableModel, TembaModel, TranslatableField
-from temba.utils.queues import DEFAULT_PRIORITY, HIGH_PRIORITY, LOW_PRIORITY, Queue, push_task
+from temba.utils.queues import HIGH_PRIORITY, Queue, push_task
 from temba.utils.text import clean_string
 
 from .handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 __message_handlers = None
-
-SEND_MSG_TASK = "send_msg_task"
 
 HANDLE_EVENT_TASK = "handle_event_task"
 MSG_EVENT = "msg"
@@ -104,8 +101,8 @@ def get_message_handlers():
             try:
                 cls = MessageHandler.find(handler_class)
                 handlers.append(cls())
-            except Exception:  # pragma: no cover
-                traceback.print_exc()
+            except Exception as e:  # pragma: no cover
+                logger.error(f"Unable to get message handlers: {str(e)}", exc_info=True)
 
         __message_handlers = handlers
 
@@ -118,23 +115,6 @@ class UnreachableException(Exception):
     """
 
     pass
-
-
-class BroadcastRecipient(models.Model):
-    """
-    Through table for broadcast recipients many-to-many
-    """
-
-    broadcast = models.ForeignKey("msgs.Broadcast", on_delete=models.PROTECT)
-
-    contact = models.ForeignKey(Contact, on_delete=models.PROTECT)
-
-    purged_status = models.CharField(
-        null=True, max_length=1, help_text=_("Used when broadcast is purged to record contact's message's state")
-    )
-
-    class Meta:
-        db_table = "msgs_broadcast_recipients"
 
 
 class Broadcast(models.Model):
@@ -173,14 +153,6 @@ class Broadcast(models.Model):
         verbose_name=_("URNs"),
         related_name="addressed_broadcasts",
         help_text=_("Individual URNs included in this message"),
-    )
-
-    recipients = models.ManyToManyField(
-        Contact,
-        through=BroadcastRecipient,
-        verbose_name=_("Recipients"),
-        related_name="broadcasts",
-        help_text=_("The contacts which received this message"),
     )
 
     recipient_count = models.IntegerField(
@@ -469,7 +441,7 @@ class Broadcast(models.Model):
                 # arbitrary media urls don't have a full content type, so only
                 # make uploads into fully qualified urls
                 if media_url and len(media_type.split("/")) > 1:
-                    media = "%s:https://%s/%s" % (media_type, settings.AWS_BUCKET_DOMAIN, media_url)
+                    media = f"{media_type}:{settings.STORAGE_URL}/{media_url}"
 
             # build our message specific context
             if expressions_context is not None:
@@ -748,7 +720,7 @@ class Msg(models.Model):
     DELETE_FOR_ARCHIVE = "A"
     DELETE_FOR_USER = "U"
 
-    DELETE_CHOICES = (((DELETE_FOR_ARCHIVE, _("Archive delete")), (DELETE_FOR_USER, _("User delete"))),)
+    DELETE_CHOICES = ((DELETE_FOR_ARCHIVE, _("Archive delete")), (DELETE_FOR_USER, _("User delete")))
 
     MEDIA_GPS = "geo"
     MEDIA_IMAGE = "image"
@@ -815,7 +787,9 @@ class Msg(models.Model):
 
     text = models.TextField(verbose_name=_("Text"), help_text=_("The actual message content that was sent"))
 
-    high_priority = models.NullBooleanField(help_text=_("Give this message higher priority than other messages"))
+    high_priority = models.BooleanField(
+        null=True, help_text=_("Give this message higher priority than other messages")
+    )
 
     created_on = models.DateTimeField(
         verbose_name=_("Created On"), db_index=True, help_text=_("When this message was created")
@@ -925,7 +899,7 @@ class Msg(models.Model):
     )
 
     connection = models.ForeignKey(
-        "channels.ChannelSession",
+        "channels.ChannelConnection",
         on_delete=models.PROTECT,
         related_name="msgs",
         null=True,
@@ -945,7 +919,6 @@ class Msg(models.Model):
         queued.
         :return:
         """
-        rapid_batches = []
         courier_batches = []
 
         # we send in chunks of 1,000 to help with contention
@@ -956,11 +929,6 @@ class Msg(models.Model):
             with transaction.atomic():
                 queued_on = timezone.now()
                 courier_msgs = []
-                task_msgs = []
-
-                task_priority = None
-                last_contact = None
-                last_channel = None
 
                 # update them to queued
                 send_messages = (
@@ -968,48 +936,32 @@ class Msg(models.Model):
                     .exclude(channel__channel_type=Channel.TYPE_ANDROID)
                     .exclude(msg_type=IVR)
                     .exclude(topup=None)
-                    .exclude(contact__is_test=True)
                 )
                 send_messages.update(status=QUEUED, queued_on=queued_on, modified_on=queued_on)
 
                 # now push each onto our queue
                 for msg in msgs:
+
+                    # in development mode, don't actual send any messages
+                    if not settings.SEND_MESSAGES:
+                        msg.status = WIRED
+                        msg.sent_on = timezone.now()
+                        msg.save(update_fields=("status", "sent_on"))
+                        logger.debug(f"FAKED SEND for [{msg.id}]")
+                        continue
+
                     if (
                         (msg.msg_type != IVR and msg.channel and msg.channel.channel_type != Channel.TYPE_ANDROID)
                         and msg.topup
-                        and not msg.contact.is_test
+                        and msg.uuid
                     ):
-                        if msg.channel.channel_type not in settings.LEGACY_CHANNELS and msg.uuid:
-                            courier_msgs.append(msg)
-                            continue
+                        courier_msgs.append(msg)
+                        continue
 
-                        # if this is a different contact than our last, and we have msgs, queue the task
-                        if task_msgs and last_contact != msg.contact_id:
-                            # if no priority was set, default to DEFAULT
-                            task_priority = DEFAULT_PRIORITY if task_priority is None else task_priority
-                            rapid_batches.append(dict(org=task_msgs[0]["org"], msgs=task_msgs, priority=task_priority))
-                            task_msgs = []
-                            task_priority = None
-
-                        # serialize the model to a dictionary
-                        msg.queued_on = queued_on
-                        task = msg.as_task_json()
-
-                        # only be low priority if no priority has been set for this task group
-                        if not msg.high_priority and task_priority is None:
-                            task_priority = LOW_PRIORITY
-
-                        task_msgs.append(task)
-                        last_contact = msg.contact_id
-
-                if task_msgs:
-                    task_priority = DEFAULT_PRIORITY if task_priority is None else task_priority
-                    rapid_batches.append(dict(org=task_msgs[0]["org"], msgs=task_msgs, priority=task_priority))
-                    task_msgs = []
-
-                # ok, now push our courier msgs
+                # ok, now batch up our courier msgs
                 last_contact = None
                 last_channel = None
+                task_msgs = []
                 for msg in courier_msgs:
                     if task_msgs and (last_contact != msg.contact_id or last_channel != msg.channel_id):
                         courier_batches.append(
@@ -1030,13 +982,7 @@ class Msg(models.Model):
                     )
 
         # send our batches
-        on_transaction_commit(lambda: cls._send_rapid_msg_batches(rapid_batches))
         on_transaction_commit(lambda: cls._send_courier_msg_batches(courier_batches))
-
-    @classmethod
-    def _send_rapid_msg_batches(cls, batches):
-        for batch in batches:
-            push_task(batch["org"], Queue.MSGS, SEND_MSG_TASK, batch["msgs"], priority=batch["priority"])
 
     @classmethod
     def _send_courier_msg_batches(cls, batches):
@@ -1068,10 +1014,7 @@ class Msg(models.Model):
                     if handled:
                         break
                 except Exception as e:  # pragma: no cover
-                    import traceback
-
-                    traceback.print_exc()
-                    logger.exception("Error in message handling: %s" % e)
+                    logger.error(f"Error in message handling: {str(e)}", exc_info=True)
 
         cls.mark_handled(msg)
 
@@ -1098,7 +1041,7 @@ class Msg(models.Model):
         if msg_type:  # pragma: needs cover
             messages = messages.filter(msg_type=msg_type)
 
-        return messages.filter(contact__is_test=False)
+        return messages
 
     @classmethod
     def fail_old_messages(cls):  # pragma: needs cover
@@ -1169,29 +1112,6 @@ class Msg(models.Model):
             if channel:
                 analytics.gauge("temba.msg_errored_%s" % channel.channel_type.lower())
 
-    @classmethod
-    def mark_sent(cls, r, msg, status, external_id=None):
-        """
-        Marks an outgoing message as WIRED or SENT
-        :param msg: a JSON representation of the message
-        """
-        msg.status = status
-        msg.sent_on = timezone.now()
-        if external_id:
-            msg.external_id = external_id
-
-        # use redis to mark this message sent
-        pipe = r.pipeline()
-        sent_key = timezone.now().strftime(MSG_SENT_KEY)
-        pipe.sadd(sent_key, str(msg.id))
-        pipe.expire(sent_key, 86400)
-        pipe.execute()
-
-        if external_id:
-            Msg.objects.filter(id=msg.id).update(status=status, sent_on=msg.sent_on, external_id=external_id)
-        else:  # pragma: no cover
-            Msg.objects.filter(id=msg.id).update(status=status, sent_on=msg.sent_on)
-
     def as_archive_json(self):
         return {
             "id": self.id,
@@ -1208,22 +1128,6 @@ class Msg(models.Model):
             "created_on": self.created_on.isoformat(),
             "sent_on": self.sent_on.isoformat() if self.sent_on else None,
         }
-
-    def as_json(self):
-        return dict(
-            direction=self.direction,
-            text=self.text,
-            id=self.id,
-            attachments=self.attachments,
-            created_on=self.created_on.strftime("%x %X"),
-            model="msg",
-            metadata=self.metadata,
-        )
-
-    def simulator_json(self):
-        msg_json = self.as_json()
-        msg_json["text"] = escape(self.text).replace("\n", "<br/>")
-        return msg_json
 
     @classmethod
     def get_text_parts(cls, text, max_length=160):
@@ -1390,7 +1294,7 @@ class Msg(models.Model):
             raise ValueError(ugettext("Cannot process an outgoing message."))
 
         # process Android and test contact messages inline
-        if not self.channel or self.channel.channel_type == Channel.TYPE_ANDROID or self.contact.is_test:
+        if not self.channel or self.channel.channel_type == Channel.TYPE_ANDROID:
             Msg.process_message(self)
 
         # others do in celery
@@ -1493,6 +1397,47 @@ class Msg(models.Model):
             return self.text
 
     @classmethod
+    def create_relayer_incoming(cls, org, channel, urn, text, received_on, attachments=None):
+        from temba.api.models import WebHookEvent
+
+        # get / create our contact and URN
+        contact, contact_urn = Contact.get_or_create(org, urn, channel, init_new=False)
+
+        # we limit our text message length and remove any invalid chars
+        if text:
+            text = clean_string(text[: cls.MAX_TEXT_LEN])
+
+        now = timezone.now()
+
+        # don't create duplicate messages
+        existing = Msg.objects.filter(text=text, sent_on=received_on, contact=contact, direction="I").first()
+        if existing:
+            return existing
+
+        msg = Msg.objects.create(
+            org=org,
+            channel=channel,
+            contact=contact,
+            contact_urn=contact_urn,
+            text=text,
+            sent_on=received_on,
+            created_on=now,
+            modified_on=now,
+            queued_on=now,
+            direction=INCOMING,
+            attachments=attachments,
+            status=PENDING,
+        )
+
+        # trigger a webhook event for the MO message
+        WebHookEvent.trigger_sms_event(WebHookEvent.TYPE_SMS_RECEIVED, msg, received_on)
+
+        # pass off handling of the message to mailroom after we commit
+        on_transaction_commit(lambda: queue_mailroom_msg_task(msg))
+
+        return msg
+
+    @classmethod
     def create_incoming(
         cls,
         channel,
@@ -1543,14 +1488,14 @@ class Msg(models.Model):
 
         # don't create duplicate messages
         existing = Msg.objects.filter(text=text, sent_on=sent_on, contact=contact, direction="I").first()
-        if existing:
+        if existing:  # pragma: no cover
             return existing
 
         # costs 1 credit to receive a message
         topup_id = None
         if topup:  # pragma: needs cover
             topup_id = topup.pk
-        elif not contact.is_test:
+        else:
             (topup_id, amount) = org.decrement_credit()
 
         now = timezone.now()
@@ -1668,8 +1613,6 @@ class Msg(models.Model):
         # for IVR messages we need a channel that can call
         if msg_type == IVR:
             role = Channel.ROLE_CALL
-        elif msg_type == USSD:
-            role = Channel.ROLE_USSD
         else:
             role = Channel.ROLE_SEND
 
@@ -1683,12 +1626,10 @@ class Msg(models.Model):
             if not channel:
                 if msg_type == IVR:
                     channel = org.get_call_channel()
-                elif msg_type == USSD:
-                    channel = org.get_ussd_channel(contact_urn=contact_urn)
                 else:
                     channel = org.get_send_channel(contact_urn=contact_urn)
 
-                if not channel and not contact.is_test:  # pragma: needs cover
+                if not channel:  # pragma: needs cover
                     raise UnreachableException("No suitable channel available for this org")
         else:
             # if message has already been sent, recipient must be a tuple of contact and URN
@@ -1753,7 +1694,7 @@ class Msg(models.Model):
                     return None
 
         # costs 1 credit to send a message
-        if not topup_id and not contact.is_test:
+        if not topup_id:
             (topup_id, _) = org.decrement_credit()
 
         if response_to:
@@ -1813,12 +1754,8 @@ class Msg(models.Model):
         resolved_schemes = set(channel.schemes) if channel else org.get_schemes(role)
 
         if isinstance(recipient, Contact):
-            if recipient.is_test:
-                contact = recipient
-                contact_urn = contact.urns.all().first()
-            else:
-                contact = recipient
-                contact_urn = contact.get_urn(schemes=resolved_schemes)  # use highest priority URN we can send to
+            contact = recipient
+            contact_urn = contact.get_urn(schemes=resolved_schemes)  # use highest priority URN we can send to
         elif isinstance(recipient, ContactURN):
             if recipient.scheme in resolved_schemes:
                 contact = recipient.contact
@@ -1867,7 +1804,7 @@ class Msg(models.Model):
         """
         Archives this message
         """
-        if self.direction != INCOMING or self.contact.is_test:
+        if self.direction != INCOMING:
             raise ValueError("Can only archive incoming non-test messages")
 
         self.visibility = Msg.VISIBILITY_ARCHIVED
@@ -1890,7 +1827,7 @@ class Msg(models.Model):
         """
         Restores (i.e. un-archives) this message
         """
-        if self.direction != INCOMING or self.contact.is_test:  # pragma: needs cover
+        if self.direction != INCOMING:  # pragma: needs cover
             raise ValueError("Can only restore incoming non-test messages")
 
         self.visibility = Msg.VISIBILITY_VISIBLE
@@ -2025,7 +1962,7 @@ class SystemLabel(object):
         return SystemLabelCount.get_totals(org)
 
     @classmethod
-    def get_queryset(cls, org, label_type, exclude_test_contacts=True):
+    def get_queryset(cls, org, label_type):
         """
         Gets the queryset for the given system label. Any change here needs to be reflected in a change to the db
         trigger used to maintain the label counts.
@@ -2054,15 +1991,7 @@ class SystemLabel(object):
         else:  # pragma: needs cover
             raise ValueError("Invalid label type: %s" % label_type)
 
-        qs = qs.filter(org=org)
-
-        if exclude_test_contacts:
-            if label_type == cls.TYPE_SCHEDULED:
-                qs = qs.exclude(contacts__is_test=True)
-            else:
-                qs = qs.exclude(contact__is_test=True)
-
-        return qs
+        return qs.filter(org=org)
 
     @classmethod
     def get_archive_attributes(cls, label_type):
@@ -2242,7 +2171,7 @@ class Label(TembaModel):
             return False
 
         # first character must be a word char
-        return regex.match("\w", name[0], flags=regex.UNICODE)
+        return regex.match(r"\w", name[0], flags=regex.UNICODE)
 
     def filter_messages(self, queryset):
         if self.is_folder():
@@ -2275,9 +2204,6 @@ class Label(TembaModel):
         for msg in msgs:
             if msg.direction != INCOMING:
                 raise ValueError("Can only apply labels to incoming messages")
-
-            if msg.contact.is_test:
-                raise ValueError("Cannot apply labels to test messages")
 
             # if we are adding the label and this message doesnt have it, add it
             if add:
@@ -2465,7 +2391,9 @@ class ExportMessagesTask(BaseExportTask):
 
         book.current_msgs_sheet = self._add_msgs_sheet(book)
 
-        msgs_exported = 0
+        total_msgs_exported = 0
+        temp_msgs_exported = 0
+
         start = time.time()
 
         contact_uuids = set()
@@ -2485,12 +2413,15 @@ class ExportMessagesTask(BaseExportTask):
         for batch in self._get_msg_batches(self.system_label, self.label, start_date, end_date, contact_uuids):
             self._write_msgs(book, batch)
 
-            msgs_exported += len(batch)
-            if msgs_exported % 10000 == 0:  # pragma: needs cover
+            total_msgs_exported += len(batch)
+
+            # start logging
+            if (total_msgs_exported - temp_msgs_exported) > ExportMessagesTask.LOG_PROGRESS_PER_ROWS:
                 mins = (time.time() - start) / 60
                 logger.info(
-                    f"Msgs export #{self.id} for org #{self.org.id}: exported {msgs_exported} in {mins:.1f} mins"
+                    f"Msgs export #{self.id} for org #{self.org.id}: exported {total_msgs_exported} in {mins:.1f} mins"
                 )
+                temp_msgs_exported = total_msgs_exported
 
         temp = NamedTemporaryFile(delete=True, suffix=".xlsx", mode="wb+")
         book.finalize(to_file=temp)

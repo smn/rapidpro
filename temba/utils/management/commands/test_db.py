@@ -47,7 +47,7 @@ from temba.values.constants import Value
 # maximum age in days of database content
 CONTENT_AGE = 3 * 365
 
-# every user will have this password including the superuser
+# by default every user will have this password including the superuser
 USER_PASSWORD = "Qwerty123"
 
 # database dump containing admin boundary records
@@ -64,10 +64,10 @@ ORG_NAMES = (
 
 # the users, channels, groups, labels and fields to create for each organization
 USERS = (
-    {"username": "admin%d", "email": "org%d_admin@example.com", "role": "administrators"},
-    {"username": "editor%d", "email": "org%d_editor@example.com", "role": "editors"},
-    {"username": "viewer%d", "email": "org%d_viewer@example.com", "role": "viewers"},
-    {"username": "surveyor%d", "email": "org%d_surveyor@example.com", "role": "surveyors"},
+    {"email": "org%d.admin@nyaruka.com", "role": "administrators"},
+    {"email": "org%d.editor@nyaruka.com", "role": "editors"},
+    {"email": "org%d.viewer@nyaruka.com", "role": "viewers"},
+    {"email": "org%d.surveyor@nyaruka.com", "role": "surveyors"},
 )
 CHANNELS = (
     {"name": "Android", "channel_type": Channel.TYPE_ANDROID, "scheme": "tel", "address": "1234"},
@@ -102,7 +102,7 @@ LABELS = ("Reporting", "Testing", "Youth", "Farming", "Health", "Education", "Tr
 FLOWS = (
     {
         "name": "Favorites",
-        "file": "favorites.json",
+        "file": "favorites_timeout.json",
         "templates": (
             ["blue", "mutzig", "bob"],
             ["orange", "green", "primus", "jeb"],
@@ -160,15 +160,15 @@ class Command(BaseCommand):
     stealth_options = ("num_orgs", "num_contacts", "seed", "org_id", "num_runs", "flow_name", "seed")
 
     def add_arguments(self, parser):
-        cmd = self
         subparsers = parser.add_subparsers(
-            dest="command", help="Command to perform", parser_class=lambda **kw: CommandParser(cmd, **kw)
+            dest="command", help="Command to perform", parser_class=lambda **kw: CommandParser(**kw)
         )
 
         gen_parser = subparsers.add_parser("generate", help="Generates a clean testing database")
         gen_parser.add_argument("--orgs", type=int, action="store", dest="num_orgs", default=10)
         gen_parser.add_argument("--contacts", type=int, action="store", dest="num_contacts", default=10000)
         gen_parser.add_argument("--seed", type=int, action="store", dest="seed", default=None)
+        gen_parser.add_argument("--password", type=str, action="store", dest="password", default=USER_PASSWORD)
 
         sim_parser = subparsers.add_parser("simulate", help="Simulates activity on an existing database")
         sim_parser.add_argument("--org", type=int, action="store", dest="org_id", default=None)
@@ -180,14 +180,14 @@ class Command(BaseCommand):
         start = time.time()
 
         if command == self.COMMAND_GENERATE:
-            self.handle_generate(kwargs["num_orgs"], kwargs["num_contacts"], kwargs["seed"])
+            self.handle_generate(kwargs["num_orgs"], kwargs["num_contacts"], kwargs["seed"], kwargs["password"])
         else:
             self.handle_simulate(kwargs["num_runs"], kwargs["org_id"], kwargs["flow_name"], kwargs["seed"])
 
         time_taken = time.time() - start
         self._log("Completed in %d secs, peak memory usage: %d MiB\n" % (int(time_taken), int(self.peak_memory())))
 
-    def handle_generate(self, num_orgs, num_contacts, seed):
+    def handle_generate(self, num_orgs, num_contacts, seed, password):
         """
         Creates a clean database
         """
@@ -214,18 +214,18 @@ class Command(BaseCommand):
         r.flushdb()
         self._log(self.style.SUCCESS("OK") + "\n")
 
-        superuser = User.objects.create_superuser("root", "root@example.com", USER_PASSWORD)
+        superuser = User.objects.create_superuser("root", "root@nyaruka.com", password)
 
         country, locations = self.load_locations(LOCATIONS_DUMP)
         orgs = self.create_orgs(superuser, country, num_orgs)
-        self.create_users(orgs)
+        self.create_users(orgs, password)
         self.create_channels(orgs)
         self.create_fields(orgs)
         self.create_groups(orgs)
+        self.create_contacts(orgs, locations, num_contacts)
         self.create_labels(orgs)
         self.create_flows(orgs)
         self.create_archives(orgs)
-        self.create_contacts(orgs, locations, num_contacts)
         self.create_campaigns(orgs)
 
     def handle_simulate(self, num_runs, org_id, flow_name, seed):
@@ -265,7 +265,7 @@ class Command(BaseCommand):
                 "channels": list(org.channels.order_by("id")),
                 "groups": list(ContactGroup.user_groups.filter(org=org).order_by("id")),
                 "flows": flows,
-                "contacts": list(org.org_contacts.values_list("id", flat=True)),  # only ids to save memory
+                "contacts": list(org.contacts.values_list("id", flat=True)),  # only ids to save memory
                 "activity": None,
             }
 
@@ -348,7 +348,7 @@ class Command(BaseCommand):
         self._log(self.style.SUCCESS("OK") + "\nInitializing orgs... ")
 
         for o, org in enumerate(orgs):
-            org.initialize(topup_size=max((1000 - o), 1) * 1000)
+            org.initialize(topup_size=max((1000 - o), 1) * 1000, flow_server_enabled=False)
 
             # we'll cache some metadata on each org as it's created to save re-fetching things
             org.cache = {
@@ -361,7 +361,7 @@ class Command(BaseCommand):
         self._log(self.style.SUCCESS("OK") + "\n")
         return orgs
 
-    def create_users(self, orgs):
+    def create_users(self, orgs, password):
         """
         Creates a user of each type for each org
         """
@@ -370,7 +370,7 @@ class Command(BaseCommand):
         # create users for each org
         for org in orgs:
             for u in USERS:
-                user = User.objects.create_user(u["username"] % org.id, u["email"] % org.id, USER_PASSWORD)
+                user = User.objects.create_user(u["email"] % org.id, u["email"] % org.id, password)
                 getattr(org, u["role"]).add(user)
                 user.set_org(org)
                 org.cache["users"].append(user)
@@ -404,7 +404,7 @@ class Command(BaseCommand):
         """
         self._log("Creating %d archives... " % (len(orgs) * ARCHIVES * 3))
 
-        MAX_RECORDS_PER_DAY = 3000000
+        MAX_RECORDS_PER_DAY = 3_000_000
 
         def create_archive(max_records, start, period):
             record_count = random.randint(0, max_records)
@@ -412,10 +412,16 @@ class Command(BaseCommand):
             archive_hash = uuid.uuid4().hex
 
             if period == Archive.PERIOD_DAILY:
-                archive_url = f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/" f"{type[0]}_{period}_{start.year}_{start.month}_{start.day}_{archive_hash}.jsonl.gz"
+                archive_url = (
+                    f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/"
+                    f"{type[0]}_{period}_{start.year}_{start.month}_{start.day}_{archive_hash}.jsonl.gz"
+                )
             else:
 
-                archive_url = f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/" f"{type[0]}_{period}_{start.year}_{start.month}_{archive_hash}.jsonl.gz"
+                archive_url = (
+                    f"https://dl-rapidpro-archives.s3.amazonaws.com/{org.id}/"
+                    f"{type[0]}_{period}_{start.year}_{start.month}_{archive_hash}.jsonl.gz"
+                )
 
             Archive.objects.create(
                 org=org,
@@ -568,14 +574,6 @@ class Command(BaseCommand):
         """
         group_counts = defaultdict(int)
 
-        self._log("Creating %d test contacts..." % (len(orgs) * len(USERS)))
-
-        for org in orgs:
-            test_contacts = []
-            for user in org.cache["users"]:
-                test_contacts.append(Contact.get_test_contact(user))
-            org.cache["test_contacts"] = test_contacts
-
         self._log(self.style.SUCCESS("OK") + "\n")
         self._log("Creating %d regular contacts...\n" % num_contacts)
 
@@ -617,9 +615,8 @@ class Command(BaseCommand):
                         "is_active": self.probability(1 - CONTACT_IS_DELETED_PROB),
                         "created_on": created_on,
                         "modified_on": self.random_date(created_on, self.db_ends_on),
+                        "fields_as_json": {},
                     }
-
-                    c["fields_as_json"] = {}
 
                     if c["gender"] is not None:
                         c["fields_as_json"][str(org.cache["fields"]["gender"].uuid)] = {"text": str(c["gender"])}

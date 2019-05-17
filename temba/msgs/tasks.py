@@ -1,4 +1,3 @@
-
 import logging
 import time
 from datetime import timedelta
@@ -15,7 +14,7 @@ from celery.task import task
 from temba.channels.courier import handle_new_contact, handle_new_message
 from temba.channels.models import CHANNEL_EVENT, ChannelEvent
 from temba.contacts.models import STOP_CONTACT_EVENT, Contact
-from temba.utils import analytics, chunk_list, json
+from temba.utils import analytics, json
 from temba.utils.queues import Queue, complete_task, nonoverlapping_task, start_task
 
 from .models import (
@@ -177,13 +176,12 @@ def send_to_flow_node(org_id, user_id, text, **kwargs):
 
     org = Org.objects.get(pk=org_id)
     user = User.objects.get(pk=user_id)
-    simulation = kwargs.get("simulation", "false") == "true"
     node_uuid = kwargs.get("s", None)
 
     runs = FlowRun.objects.filter(org=org, current_node_uuid=node_uuid, is_active=True)
 
     contact_ids = (
-        Contact.objects.filter(org=org, is_blocked=False, is_stopped=False, is_active=True, is_test=simulation)
+        Contact.objects.filter(org=org, is_blocked=False, is_stopped=False, is_active=True)
         .filter(id__in=runs.values_list("contact", flat=True))
         .values_list("id", flat=True)
     )
@@ -203,7 +201,7 @@ def send_spam(user_id, contact_id):  # pragma: no cover
     from temba.contacts.models import Contact, TEL_SCHEME
     from temba.msgs.models import Broadcast
 
-    contact = Contact.all().get(pk=contact_id)
+    contact = Contact.objects.get(pk=contact_id)
     user = User.objects.get(pk=user_id)
     channel = contact.org.get_send_channel(TEL_SCHEME)
 
@@ -211,7 +209,10 @@ def send_spam(user_id, contact_id):  # pragma: no cover
         print("Sorry, no channel to be all spammy with")
         return
 
-    long_text = "Test Message #%d. The path of the righteous man is beset on all sides by the iniquities of the " "selfish and the tyranny of evil men. Blessed is your face."
+    long_text = (
+        "Test Message #%d. The path of the righteous man is beset on all sides by the iniquities of the "
+        "selfish and the tyranny of evil men. Blessed is your face."
+    )
 
     # only trigger sync on the last one
     for idx in range(10):
@@ -282,8 +283,13 @@ def collect_message_metrics_task():  # pragma: needs cover
     )
     analytics.gauge("temba.current_outgoing_android", count)
 
-    # current # of pending incoming messages that haven't yet been handled
-    count = Msg.objects.filter(direction=INCOMING, status=PENDING).exclude(channel=None).count()
+    # current # of pending incoming messages older than a minute that haven't yet been handled
+    minute_ago = timezone.now() - timedelta(minutes=1)
+    count = (
+        Msg.objects.filter(direction=INCOMING, status=PENDING, created_on__lte=minute_ago)
+        .exclude(channel=None)
+        .count()
+    )
     analytics.gauge("temba.current_incoming_pending", count)
 
     # stuff into redis when we last run, we do this as a canary as to whether our tasks are falling behind or not running
@@ -298,7 +304,6 @@ def check_messages_task():  # pragma: needs cover
     """
     from .models import INCOMING, PENDING
     from temba.orgs.models import Org
-    from temba.channels.tasks import send_msg_task
     from temba.flows.tasks import start_msg_flow_batch_task
 
     now = timezone.now()
@@ -306,22 +311,21 @@ def check_messages_task():  # pragma: needs cover
     r = get_redis_connection()
 
     # for any org that sent messages in the past five minutes, check for pending messages
-    for org in Org.objects.filter(msgs__created_on__gte=five_minutes_ago).distinct():
+    for org in Org.objects.filter(msgs__created_on__gte=five_minutes_ago, flow_server_enabled=False).distinct():
         # more than 1,000 messages queued? don't do anything, wait for our queue to go down
         queued = r.zcard("send_message_task:%d" % org.id)
         if queued < 1000:
             org.trigger_send()
 
-    # fire a few send msg tasks in case we dropped one somewhere during a restart
+    # fire a few tasks in case we dropped one somewhere during a restart
     # (these will be no-ops if there is nothing to do)
     for i in range(100):
-        send_msg_task.apply_async(queue=Queue.MSGS)
         handle_event_task.apply_async(queue=Queue.HANDLER)
         start_msg_flow_batch_task.apply_async(queue=Queue.FLOWS)
 
     # also check any incoming messages that are still pending somehow, reschedule them to be handled
     unhandled_messages = Msg.objects.filter(direction=INCOMING, status=PENDING, created_on__lte=five_minutes_ago)
-    unhandled_messages = unhandled_messages.exclude(channel__is_active=False).exclude(contact__is_test=True)
+    unhandled_messages = unhandled_messages.exclude(channel__is_active=False).exclude(org__flow_server_enabled=True)
     unhandled_count = unhandled_messages.count()
 
     if unhandled_count:
@@ -383,24 +387,8 @@ def handle_event_task():
         complete_task(HANDLE_EVENT_TASK, org_id)
 
 
-@nonoverlapping_task(track_started=True, name="squash_msgcounts")
+@nonoverlapping_task(track_started=True, name="squash_msgcounts", lock_timeout=7200)
 def squash_msgcounts():
     SystemLabelCount.squash()
     LabelCount.squash()
     BroadcastMsgCount.squash()
-
-
-@nonoverlapping_task(track_started=True, name="clear_old_msg_external_ids", time_limit=60 * 60 * 36)
-def clear_old_msg_external_ids():
-    """
-    Clears external_id on older messages to reduce the size of the index on that column. External ids aren't surfaced
-    anywhere and are only used for debugging channel issues, so are of limited usefulness on older messages.
-    """
-    threshold = timezone.now() - timedelta(days=30)  # 30 days ago
-
-    msg_ids = list(Msg.objects.filter(created_on__lt=threshold).exclude(external_id=None).values_list("id", flat=True))
-
-    for msg_id_batch in chunk_list(msg_ids, 1000):
-        Msg.objects.filter(id__in=msg_id_batch).update(external_id=None)
-
-    print("Cleared external ids on %d messages" % len(msg_ids))
