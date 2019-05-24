@@ -1311,11 +1311,11 @@ class Flow(TembaModel):
                     channel_name = action.get("name")
 
                     if channel_uuid is not None:
-                        channel = Channel.objects.filter(is_active=True, uuid=channel_uuid).first()
+                        channel = self.org.channels.filter(is_active=True, uuid=channel_uuid).first()
 
                     if channel is None and channel_name is not None:
                         name = channel_name.split(":")[-1].strip()
-                        channel = Channel.objects.filter(is_active=True, name=name).first()
+                        channel = self.org.channels.filter(is_active=True, name=name).first()
 
                     if channel is None:
                         continue
@@ -1347,7 +1347,7 @@ class Flow(TembaModel):
                     remap_group(group)
 
         # now update with our remapped values
-        self.update(flow_json, validate_dependencies=False)
+        self.update(flow_json)
         return self
 
     def archive(self):
@@ -2354,7 +2354,7 @@ class Flow(TembaModel):
 
         return revision
 
-    def update(self, json_dict, user=None, force=False, validate_dependencies=True):
+    def update(self, json_dict, user=None, force=False):
         """
         Updates a definition for a flow and returns the new revision
         """
@@ -2393,7 +2393,7 @@ class Flow(TembaModel):
                     actions = [_.as_json() for _ in Action.from_json_array(self.org, actionset.get(Flow.ACTIONS))]
                     actionset[Flow.ACTIONS] = actions
 
-            validated = mailroom.get_client().flow_validate(self.org if validate_dependencies else None, json_dict)
+            validated = mailroom.get_client().flow_validate(org=None, definition=json_dict)
             dependencies = validated["_dependencies"]
 
             with transaction.atomic():
@@ -4308,7 +4308,9 @@ class FlowRevision(SmartModel):
 
         return json_flow
 
-    def get_definition_json(self, to_version=get_current_export_version()):
+    def get_definition_json(self, to_version=None):
+        if not to_version:
+            to_version = get_current_export_version()
 
         definition = self.definition
 
